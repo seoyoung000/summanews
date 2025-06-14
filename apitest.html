@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>실시간 뉴스 요약 챗봇</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #f0f4f8;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px;
+    }
+    .chat-box {
+      width: 400px;
+      max-height: 600px;
+      background-color: #fff;
+      border-radius: 16px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+      padding: 20px;
+      overflow-y: auto;
+    }
+    .message {
+      margin-bottom: 12px;
+      padding: 10px 14px;
+      border-radius: 14px;
+      max-width: 80%;
+    }
+    .user {
+      background-color: #dcedc8;
+      align-self: flex-end;
+    }
+    .bot {
+      background-color: #e3f2fd;
+      align-self: flex-start;
+    }
+    button {
+      margin-top: 20px;
+      padding: 10px 20px;
+      border: none;
+      background-color: #1e88e5;
+      color: white;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #1565c0;
+    }
+  </style>
+</head>
+<body>
+  <h1>📰 뉴스 요약 챗봇</h1>
+  <div class="chat-box" id="chatBox">
+    <div class="message bot">안녕하세요! 보고 싶은 뉴스를 선택해주세요 😊</div>
+  </div>
+  <button onclick="getNews()">🗞️ 추천 뉴스 요약해줘</button>
+
+  <script>
+    const apiKey = "a80b5826f01349c5824f4298d8f61eef"; // ← 반드시 본인의 NewsAPI 키로 바꿔야 작동
+
+    function addMessage(text, sender = 'bot') {
+      const div = document.createElement('div');
+      div.className = 'message ' + sender;
+      div.textContent = text;
+      document.getElementById('chatBox').appendChild(div);
+    }
+
+    async function getNews() {
+      addMessage("추천 뉴스를 가져오는 중이에요...", "bot");
+
+      try {
+        const res = await fetch(`https://newsapi.org/v2/top-headlines?country=kr&pageSize=3&apiKey=${apiKey}`);
+        const data = await res.json();
+
+        if (data.articles && data.articles.length > 0) {
+          data.articles.forEach(article => {
+            const summary = `📰 ${article.title}\n👉 ${article.description || '요약 없음'}`;
+            addMessage(summary, "bot");
+          });
+        } else {
+          addMessage("뉴스를 불러오지 못했어요 😢", "bot");
+        }
+      } catch (err) {
+        console.error(err);
+        addMessage("뉴스를 불러오는 데 문제가 발생했어요.", "bot");
+      }
+    }
+  </script>
+</body>
+</html>
