@@ -1,536 +1,307 @@
-# 📦 패키지 설치
-!pip install -q flask flask-cors requests beautifulsoup4 pyngrok lxml nest-asyncio
+!pip install -q flask flask-cors requests beautifulsoup4 pyngrok lxml newspaper3k lxml_html_clean transformers torch sentencepiece
+!pip install -U newspaper3k
 
-print("📦 패키지 설치 완료!")
-print("🚀 서버를 시작합니다...\n")
+print("📦 패키지 설치 완료! (시간 조금 걸릴 수 있어요)")
 
-# 🚀 서버 코드 및 실행
+# -----------------------------
+# 서버 코드
+# -----------------------------
 from flask import Flask, jsonify, request, render_template_string
 from flask_cors import CORS
-import os
-import requests
-import json
-import time
-from datetime import datetime, timedelta
-import re
+import os, requests, json, time, re, random, threading
+from datetime import datetime
 from bs4 import BeautifulSoup
 from pyngrok import ngrok
-import urllib.parse
-import threading
 import nest_asyncio
+from newspaper import Article
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 
-# Colab에서 비동기 실행을 위해 필요
+# Colab 비동기 관련
 nest_asyncio.apply()
 
 app = Flask(__name__)
-# CORS 설정 강화
-CORS(app, resources={
-    r"/api/*": {
-        "origins": "*",
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
-    }
-})
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-# API 키 설정
-os.environ['NAVER_CLIENT_ID'] = 'fe9DLGhYbEVLy4sdQnVk'
-os.environ['NAVER_CLIENT_SECRET'] = '2f0NEntTNN'
-os.environ['NEWSAPI_KEY'] = 'a80b5826f01349c5824f4298d8f61eef'
+# -----------------------------
+# 환경변수
+# -----------------------------
+os.environ.setdefault('NAVER_CLIENT_ID', 'fe9DLGhYbEVLy4sdQnVk')
+os.environ.setdefault('NAVER_CLIENT_SECRET', '2f0NEntTNN')
+os.environ.setdefault('NEWSAPI_KEY', 'a80b5826f01349c5824f4298d8f61eef')
+NGROK_AUTHTOKEN = "30KyKWx0zSS7ZJpm5TnJOKdI6fC_7y1Lta8QCMEyH6ZLjjrxj"
 
-# ngrok 인증 토큰 설정
-ngrok.set_auth_token("30KyKWx0zSS7ZJpm5TnJOKdI6fC_7y1Lta8QCMEyH6ZLjjrxj")
-
-# 카테고리 매핑
 CATEGORIES = {
-    '정치': '100',
-    '경제': '101',
-    '사회': '102',
-    '생활문화': '103',
-    '연예': '106',
-    '스포츠': '107',
-    '건강': '108',
+    '정치': 'politics',
+    '경제': 'business',
+    '사회': 'society',
+    '생활문화': 'life',
+    '연예': 'entertainment',
+    '스포츠': 'sports',
+    '건강': 'health',
     '오늘의추천': 'today'
 }
 
-# HTML 테스트 페이지 템플릿
-TEST_PAGE_HTML = """
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>뉴스 AI 서버 테스트</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+# -----------------------------
+# 요약 모델 초기화 (경량화 T5 모델로 변경)
+# -----------------------------
+def init_summarizer():
+    print("🔁 경량 한국어 요약 모델을 로드합니다... (속도가 빠릅니다!)")
+    
+    # 추천 모델 리스트 (가벼운 순서)
+    candidates = [
+        "eenzeenee/t5-small-korean-summarization",
+        "gogamza/kobart-summarization" # 현재 사용중인 모델
+    ]
 
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
+    for model_name in candidates:
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+            
+            # T5 모델은 특정 프롬프트가 필요할 수 있습니다.
+            # pipeline을 사용하면 자동으로 처리해주는 경우가 많지만,
+            # 혹시 문제가 생기면 직접 input을 구성해야 합니다.
+            summarizer = pipeline("summarization", model=model, tokenizer=tokenizer, framework="pt")
+            
+            print(f"✅ 경량 요약 모델 로드 완료: {model_name}")
+            return summarizer
+        except Exception as e:
+            print(f"⚠️ 모델 로드 실패 ({model_name}): {e}")
+            continue
 
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-            overflow: hidden;
-        }
+    print("⚠️ 모든 모델 로드 실패. 룰 기반 요약(fallback)을 사용합니다.")
+    return None
 
-        .header {
-            background: #2c3e50;
-            color: white;
-            padding: 20px;
-            text-align: center;
-        }
+summarizer = init_summarizer()
 
-        .header h1 {
-            font-size: 2em;
-            margin-bottom: 10px;
-        }
+# make_summary 함수는 그대로 두셔도 됩니다.
+# max_length, min_length 파라미터로 미리보기/상세보기 요약 조절 가능
 
-        .controls {
-            padding: 20px;
-            background: #f8f9fa;
-            border-bottom: 1px solid #dee2e6;
-        }
+# -----------------------------
+# HTML 태그 제거 및 기사 본문 추출
+# -----------------------------
+def clean_text(html_text):
+    if not html_text:
+        return ""
+    text = re.sub(r'<[^>]+>', '', html_text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
-        .input-group {
-            display: flex;
-            gap: 10px;
-            align-items: center;
-            flex-wrap: wrap;
-        }
+def get_article_text(url):
+    try:
+        article = Article(url, language='ko')
+        article.download()
+        article.parse()
+        return article.text
+    except Exception as e:
+        print(f"⚠️ 기사 본문 추출 실패: {e}")
+        return None
 
-        .input-group label {
-            font-weight: bold;
-            min-width: 100px;
-        }
+# -----------------------------
+# 대표 이미지 & 조회수 추출
+# -----------------------------
+def extract_image_and_views(url, timeout=6):
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    try:
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        if resp.status_code != 200:
+            return None, None
+        soup = BeautifulSoup(resp.content, 'html.parser')
+        img_selectors = [
+            ('meta[property="og:image"]', 'content'),
+            ('meta[name="twitter:image"]', 'content'),
+            ('meta[itemprop="image"]', 'content'),
+            ('img[class*="thumb"]', 'src'),
+            ('img[class*="photo"]', 'src'),
+            ('article img', 'src'),
+            ('img', 'src')
+        ]
+        image = None
+        for sel, attr in img_selectors:
+            tag = soup.select_one(sel)
+            if tag:
+                image = tag.get(attr) if getattr(tag, 'get', None) else None
+                if image and image.startswith('//'):
+                    image = 'https:' + image
+                if image:
+                    break
+        text = soup.get_text(separator=' ')
+        view_patterns = [
+            r'조회수[^\d]*([\d,]+)',
+            r'조회[^\d]*([\d,]+)',
+            r'Views[^\d]*([\d,]+)',
+            r'views[^\d]*([\d,]+)',
+            r'view[^\d]*([\d,]+)',
+            r'읽음[^\d]*([\d,]+)',
+            r'PV[^\d]*([\d,]+)'
+        ]
+        views = None
+        for p in view_patterns:
+            m = re.search(p, text, re.IGNORECASE)
+            if m:
+                v = m.group(1)
+                v = int(re.sub(r'[^0-9]', '', v))
+                views = v
+                break
+        if not image:
+            try:
+                art = Article(url)
+                art.download()
+                art.parse()
+                if art.top_image:
+                    image = art.top_image
+            except Exception:
+                pass
+        return image, views
+    except Exception:
+        return None, None
 
-        .input-group select {
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            font-size: 14px;
-        }
+# -----------------------------
+# 요약 함수 수정
+# -----------------------------
+def make_summary(text, mode='preview'):
+    text = (text or "").strip()
+    if not text:
+        return ""
+    
+    if summarizer:
+        try:
+            # KoBART는 512 토큰 제한이 있으므로, 입력 텍스트를 적절히 잘라줍니다.
+            text_to_summarize = text[:1000] 
+            
+            if mode == 'preview':
+                # 미리보기: 1~2줄 요약 (max_length를 짧게 설정)
+                out = summarizer(text_to_summarize, max_length=150, min_length=50, do_sample=True, top_p=0.92)
+            else:
+                # 상세 요약: 3~6줄 요약 (max_length를 길게 설정)
+                out = summarizer(text_to_summarize, max_length=250, min_length=100, do_sample=True, top_p=0.92)
+            
+            summary = out[0]['summary_text'].strip()
+            
+            # 요약이 완전한 문장으로 끝나도록 보정
+            if not summary.endswith(('.', '!', '?', '…')):
+                summary += '.'
+            
+            return summary
+        except Exception as e:
+            print(f"⚠️ 요약 모델 오류: {e}")
+            pass
 
-        .btn {
-            padding: 10px 20px;
-            background: #007bff;
-            color: white;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 14px;
-            transition: background 0.3s;
-        }
+    # 모델 요약 실패 시 대체 (Fallback)
+    sentences = re.split(r'(?<=[.!?。！？])\s+', text)
+    if mode == 'preview':
+        # 2문장으로 미리보기 요약
+        return " ".join(sentences[:2])[:300] + ("..." if len(" ".join(sentences[:2])) > 300 else "")
+    else:
+        # 6문장으로 상세 요약
+        return " ".join(sentences[:6])[:2000] + ("..." if len(" ".join(sentences[:6])) > 2000 else "")
 
-        .btn:hover {
-            background: #0056b3;
-        }
-
-        .btn-success { background: #28a745; }
-        .btn-success:hover { background: #1e7e34; }
-
-        .btn-warning { background: #ffc107; color: #212529; }
-        .btn-warning:hover { background: #e0a800; }
-
-        .results {
-            padding: 20px;
-        }
-
-        .status {
-            padding: 10px;
-            border-radius: 5px;
-            margin-bottom: 20px;
-        }
-
-        .status.loading {
-            background: #fff3cd;
-            border: 1px solid #ffeaa7;
-            color: #856404;
-        }
-
-        .status.success {
-            background: #d4edda;
-            border: 1px solid #c3e6cb;
-            color: #155724;
-        }
-
-        .status.error {
-            background: #f8d7da;
-            border: 1px solid #f5c6cb;
-            color: #721c24;
-        }
-
-        .news-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-            gap: 20px;
-            margin-top: 20px;
-        }
-
-        .news-card {
-            border: 1px solid #dee2e6;
-            border-radius: 8px;
-            overflow: hidden;
-            background: white;
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
-
-        .news-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-        }
-
-        .news-card img {
-            width: 100%;
-            height: 200px;
-            object-fit: cover;
-        }
-
-        .news-card .content {
-            padding: 15px;
-        }
-
-        .news-card h3 {
-            font-size: 16px;
-            margin-bottom: 10px;
-            line-height: 1.4;
-        }
-
-        .news-card p {
-            font-size: 14px;
-            color: #666;
-            margin-bottom: 10px;
-            line-height: 1.5;
-        }
-
-        .news-card .meta {
-            font-size: 12px;
-            color: #999;
-            border-top: 1px solid #eee;
-            padding-top: 10px;
-        }
-
-        .category-badge {
-            display: inline-block;
-            padding: 3px 8px;
-            background: #007bff;
-            color: white;
-            border-radius: 12px;
-            font-size: 11px;
-            margin-right: 5px;
-        }
-
-        .json-viewer {
-            background: #f8f9fa;
-            border: 1px solid #dee2e6;
-            border-radius: 5px;
-            padding: 15px;
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
-            white-space: pre-wrap;
-            max-height: 400px;
-            overflow-y: auto;
-            margin-top: 15px;
-        }
-
-        .quick-tests {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-            margin-top: 15px;
-        }
-
-        .placeholder-img {
-            width: 100%;
-            height: 200px;
-            background: linear-gradient(45deg, #f0f0f0 25%, transparent 25%),
-                        linear-gradient(-45deg, #f0f0f0 25%, transparent 25%),
-                        linear-gradient(45deg, transparent 75%, #f0f0f0 75%),
-                        linear-gradient(-45deg, transparent 75%, #f0f0f0 75%);
-            background-size: 20px 20px;
-            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #999;
-            font-size: 14px;
-        }
-
-        .server-info {
-            background: #e9ecef;
-            padding: 15px;
-            border-radius: 5px;
-            margin-bottom: 20px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🗞️ 뉴스 AI 서버 테스트</h1>
-            <p>서버가 정상적으로 실행되고 있습니다!</p>
-        </div>
-
-        <div class="controls">
-            <div class="server-info">
-                <h3>📡 서버 정보</h3>
-                <p><strong>현재 URL:</strong> {{ current_url }}</p>
-                <p><strong>상태:</strong> <span style="color: green;">✅ 실행중</span></p>
-                <p><strong>지원 카테고리:</strong> {{ categories|join(', ') }}</p>
-            </div>
-
-            <div class="input-group">
-                <label for="category">카테고리:</label>
-                <select id="category">
-                    <option value="">전체 뉴스</option>
-                    <option value="정치">정치</option>
-                    <option value="경제">경제</option>
-                    <option value="사회">사회</option>
-                    <option value="생활문화">생활문화</option>
-                    <option value="연예">연예</option>
-                    <option value="스포츠">스포츠</option>
-                    <option value="건강">건강</option>
-                    <option value="오늘의추천">오늘의추천</option>
-                </select>
-                <button class="btn" onclick="fetchNews()">뉴스 가져오기</button>
-                <button class="btn btn-warning" onclick="showJson()">JSON 보기</button>
-            </div>
-
-            <div class="quick-tests">
-                <button class="btn btn-success" onclick="quickTest('categories')">카테고리 목록</button>
-                <button class="btn" onclick="quickTest('정치')">정치 뉴스</button>
-                <button class="btn" onclick="quickTest('경제')">경제 뉴스</button>
-                <button class="btn" onclick="quickTest('연예')">연예 뉴스</button>
-            </div>
-        </div>
-
-        <div class="results">
-            <div id="status"></div>
-            <div id="newsContainer"></div>
-        </div>
-    </div>
-
-    <script>
-        let currentData = null;
-        const serverUrl = window.location.origin; // 현재 서버 URL 사용
-
-        function showStatus(message, type = 'loading') {
-            const status = document.getElementById('status');
-            status.className = `status ${type}`;
-            status.innerHTML = message;
-        }
-
-        async function fetchNews() {
-            const category = document.getElementById('category').value;
-            const endpoint = category ? `/api/news/${category}` : '/api/news';
-
-            showStatus('뉴스를 가져오는 중...', 'loading');
-
-            try {
-                const response = await fetch(`${serverUrl}${endpoint}`);
-                currentData = await response.json();
-
-                if (response.ok) {
-                    displayNews(currentData);
-                    showStatus(`✅ 뉴스 로드 완료!`, 'success');
-                } else {
-                    showStatus(`❌ 오류: ${currentData.error || '알 수 없는 오류'}`, 'error');
-                }
-            } catch (error) {
-                showStatus(`❌ 요청 실패: ${error.message}`, 'error');
-            }
-        }
-
-        function displayNews(data) {
-            const container = document.getElementById('newsContainer');
-
-            if (data.category) {
-                // 단일 카테고리
-                const newsHtml = data.news.map(news => createNewsCard(news)).join('');
-                container.innerHTML = `
-                    <h2>📰 ${data.category} (${data.total}개)</h2>
-                    <div class="news-grid">${newsHtml}</div>
-                `;
-            } else {
-                // 전체 카테고리
-                let html = '<h2>📰 전체 뉴스</h2>';
-                for (const [category, newsList] of Object.entries(data)) {
-                    const newsHtml = newsList.map(news => createNewsCard(news)).join('');
-                    html += `
-                        <h3 style="margin-top: 30px; margin-bottom: 15px;">🏷️ ${category} (${newsList.length}개)</h3>
-                        <div class="news-grid">${newsHtml}</div>
-                    `;
-                }
-                container.innerHTML = html;
-            }
-        }
-
-        function createNewsCard(news) {
-            const imageHtml = news.image_url
-                ? `<img src="${news.image_url}" alt="뉴스 이미지" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
-                   <div class="placeholder-img" style="display: none;">이미지 없음</div>`
-                : `<div class="placeholder-img">이미지 없음</div>`;
-
-            return `
-                <div class="news-card">
-                    ${imageHtml}
-                    <div class="content">
-                        <h3>${news.title}</h3>
-                        <p><strong>미리보기:</strong> ${news.preview_summary}</p>
-                        ${news.detailed_summary ? `<p><strong>상세:</strong> ${news.detailed_summary}</p>` : ''}
-                        <div class="meta">
-                            <span class="category-badge">${news.category}</span>
-                            <span>${new Date(news.pub_date).toLocaleString('ko-KR')}</span>
-                            <br>
-                            <a href="${news.link}" target="_blank" style="color: #007bff;">원문 보기</a>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
-
-        async function quickTest(test) {
-            if (test === 'categories') {
-                showStatus('카테고리 목록을 가져오는 중...', 'loading');
-                try {
-                    const response = await fetch(`${serverUrl}/api/categories`);
-                    const categories = await response.json();
-                    showStatus(`✅ 지원 카테고리: ${categories.join(', ')}`, 'success');
-                } catch (error) {
-                    showStatus(`❌ 오류: ${error.message}`, 'error');
-                }
-            } else {
-                document.getElementById('category').value = test;
-                await fetchNews();
-            }
-        }
-
-        function showJson() {
-            if (!currentData) {
-                showStatus('먼저 뉴스를 가져와주세요.', 'error');
-                return;
-            }
-
-            const container = document.getElementById('newsContainer');
-            container.innerHTML = `
-                <h2>📄 JSON 데이터</h2>
-                <div class="json-viewer">${JSON.stringify(currentData, null, 2)}</div>
-            `;
-            showStatus('JSON 데이터를 표시했습니다.', 'success');
-        }
-
-        // 페이지 로드 시 자동으로 정치 뉴스 로드
-        window.onload = function() {
-            showStatus('서버가 정상적으로 실행중입니다.', 'success');
-        };
-    </script>
-</body>
-</html>
-"""
-
+# -----------------------------
+# NewsService 클래스
+# -----------------------------
 class NewsService:
     def __init__(self):
         self.naver_client_id = os.environ.get('NAVER_CLIENT_ID')
         self.naver_client_secret = os.environ.get('NAVER_CLIENT_SECRET')
         self.newsapi_key = os.environ.get('NEWSAPI_KEY')
-
-    def get_naver_news(self, category, count=5):
-        """네이버 뉴스 API로 최신 뉴스 가져오기"""
-        url = "https://openapi.naver.com/v1/search/news.json"
-
-        query_map = {
-            '정치': '정치',
-            '경제': '경제',
-            '사회': '사회',
-            '생활문화': '생활 문화',
-            '연예': '연예',
-            '스포츠': '스포츠',
-            '건강': '건강',
+        self.query_map = {
+            '정치': '정치', '경제': '경제', '사회': '사회',
+            '생활문화': '생활 문화', '연예': '연예',
+            '스포츠': '스포츠', '건강': '건강',
             '오늘의추천': '뉴스'
         }
-
+    def get_naver_news(self, category, count=5):
+        url = "https://openapi.naver.com/v1/search/news.json"
         headers = {
             'X-Naver-Client-Id': self.naver_client_id,
             'X-Naver-Client-Secret': self.naver_client_secret
         }
-
-        params = {
-            'query': query_map.get(category, '뉴스'),
-            'display': count,
-            'start': 1,
-            'sort': 'date'
-        }
-
+        params = {'query': self.query_map.get(category, '뉴스'), 'display': count, 'start': 1, 'sort': 'date'}
         try:
-            response = requests.get(url, headers=headers, params=params)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"네이버 뉴스 API 오류: {e}")
-            return None
-
-    def extract_image_from_content(self, link):
-        """뉴스 링크에서 대표 이미지 추출"""
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            response = requests.get(link, headers=headers, timeout=5)
-            soup = BeautifulSoup(response.content, 'html.parser')
-
-            img_selectors = [
-                'meta[property="og:image"]',
-                'meta[name="twitter:image"]',
-                '.end_photo_org img',
-                '.article_photo img',
-                'article img',
-                '.news_img img'
-            ]
-
-            for selector in img_selectors:
-                img_tag = soup.select_one(selector)
-                if img_tag:
-                    if selector.startswith('meta'):
-                        img_url = img_tag.get('content')
-                    else:
-                        img_url = img_tag.get('src')
-
-                    if img_url and img_url.startswith('http'):
-                        return img_url
-
-            return None
+            r = requests.get(url, headers=headers, params=params, timeout=6)
+            r.raise_for_status()
+            return r.json().get('items', [])
         except Exception as e:
-            return None
-
-    def summarize_news(self, title, description, detail_type="preview"):
-        """AI를 사용한 뉴스 요약"""
+            print("네이버 API 오류:", e)
+            return []
+    def get_newsapi_news(self, category, count=5):
+        url = "https://newsapi.org/v2/top-headlines"
+        params = {'apiKey': self.newsapi_key, 'pageSize': count, 'page': 1,
+                    'category': map_category_newsapi(category), 'language': 'ko'}
         try:
-            content = f"{title} {description}"
-
-            if detail_type == "preview":
-                if len(content) > 50:
-                    return content[:47] + "..."
-                return content
-            else:
-                if len(content) > 150:
-                    return content[:147] + "..."
-                return content
-
+            r = requests.get(url, params=params, timeout=6)
+            r.raise_for_status()
+            data = r.json()
+            return data.get('articles', [])
         except Exception as e:
-            return title[:50] + "..." if len(title) > 50 else title
+            print("NewsAPI 오류:", e)
+            return []
 
 news_service = NewsService()
 
-# CORS 헤더를 모든 응답에 추가
+def map_category_newsapi(category):
+    mapping = {'정치': None, '경제': 'business', '사회': None, '생활문화': None,
+               '연예': 'entertainment', '스포츠': 'sports', '건강': 'health'}
+    return mapping.get(category, None)
+
+def normalize_and_enrich(items, source='naver', category='일반'):
+    normalized = []
+    for it in items:
+        try:
+            if source == 'naver':
+                title = clean_text(it.get('title'))
+                description = clean_text(it.get('description'))
+                link = it.get('link')
+                
+                # 네이버 날짜 형식 변환
+                pub_date_raw = it.get('pubDate')
+                try:
+                    # 'Sun, 07 Sep 2025 16:06:00 +0900' 형식 파싱
+                    dt_obj = datetime.strptime(pub_date_raw, '%a, %d %b %Y %H:%M:%S %z')
+                    # '2025/09/07 +0900 16:06:00' 형식으로 재포맷
+                    pub_date = dt_obj.strftime('%Y/%m/%d %z %H:%M:%S')
+                except (ValueError, TypeError):
+                    pub_date = pub_date_raw # 실패 시 원래 값 유지
+
+                # 네이버는 description이 짧아, 기사 본문을 직접 크롤링
+                full_text = get_article_text(link)
+                text_to_summarize = full_text if full_text and len(full_text) > 100 else (title + ". " + description)
+            else:
+                title = it.get('title') or ''
+                description = it.get('description') or (it.get('content') or '')
+                link = it.get('url')
+                
+                # NewsAPI 날짜 형식 변환 (ISO 8601)
+                pub_date_raw = it.get('publishedAt')
+                try:
+                    dt_obj = datetime.fromisoformat(pub_date_raw.replace('Z', '+00:00'))
+                    pub_date = dt_obj.strftime('%Y/%m/%d %z %H:%M:%S')
+                except (ValueError, TypeError):
+                    pub_date = pub_date_raw
+                
+                text_to_summarize = (title + ". " + description)
+            
+            preview = make_summary(text_to_summarize, mode='preview')
+            detailed = make_summary(text_to_summarize, mode='detailed')
+            image_url, views = extract_image_and_views(link)
+            
+            # 조회수(views)가 없을 경우 'None'으로 설정
+            views_display = str(views) if views is not None else "None"
+
+            news_item = {
+                "title": title, "description": description, "link": link, "pub_date": pub_date,
+                "image_url": image_url, "view_count": views_display,
+                "preview_summary": preview, "detailed_summary": detailed,
+                "source": source, "category": category, "is_headline": False
+            }
+            normalized.append(news_item)
+        except Exception as e:
+            continue
+    return normalized
+
+# -----------------------------
+# API 엔드포인트
+# -----------------------------
 @app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -538,11 +309,10 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
     return response
 
-# 라우트 정의
 @app.route('/')
 def home():
     return jsonify({
-        "message": "🗞️ 뉴스 추천 AI 서버가 실행중입니다!",
+        "message": "🗞️ 뉴스 추천 AI 서버 (완성본) 실행중!",
         "endpoints": {
             "/api/news/<category>": "카테고리별 뉴스 조회",
             "/api/news": "전체 카테고리 뉴스 조회",
@@ -553,126 +323,221 @@ def home():
         "status": "running"
     })
 
-# 웹 테스트 페이지
+# -----------------------------
+# 웹 테스트 페이지 수정 (오늘의추천 버튼)
+# -----------------------------
+TEST_PAGE_HTML = """
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>뉴스 AI 서버 테스트</title>
+<style>
+body{font-family:Segoe UI,Roboto,Arial;background:linear-gradient(135deg,#667eea,#764ba2);margin:0;padding:20px}
+.container{max-width:1100px;margin:0 auto;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.15)}
+.header{background:#2c3e50;color:#fff;padding:18px;text-align:center}
+.controls{padding:16px;background:#f8f9fa;border-bottom:1px solid #e9ecef}
+.input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+select,input{padding:8px;border-radius:6px;border:1px solid #ddd}
+.btn{padding:8px 12px;border-radius:6px;background:#007bff;color:#fff;border:none;cursor:pointer}
+.results{padding:16px}
+.news-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}
+.news-card{border:1px solid #eee;border-radius:8px;overflow:hidden;background:#fff}
+.news-card img{width:100%;height:180px;object-fit:cover}
+.content{padding:12px}
+.badge{display:inline-block;padding:4px 8px;border-radius:12px;background:#ff4757;color:#fff;font-size:12px;margin-right:6px}
+.meta{font-size:12px;color:#666;margin-top:8px}
+.json-viewer{background:#f7f7f7;padding:12px;border-radius:6px;white-space:pre-wrap;max-height:400px;overflow:auto}
+.today-btn{margin-right:6px;margin-top:4px}
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header"><h2>뉴스 AI 서버 테스트</h2><div>서버 실행중</div></div>
+    <div class="controls">
+        <div style="margin-bottom:8px;">
+            <label>카테고리:</label>
+            <select id="category">
+                <option value="">전체</option>
+                <option value="정치">정치</option>
+                <option value="경제">경제</option>
+                <option value="사회">사회</option>
+                <option value="생활문화">생활문화</option>
+                <option value="연예">연예</option>
+                <option value="스포츠">스포츠</option>
+                <option value="건강">건강</option>
+                <option value="오늘의추천">오늘의추천</option>
+            </select>
+            <button class="btn" onclick="fetchNews()">뉴스 가져오기</button>
+            <button class="btn" onclick="showJson()">JSON 보기</button>
+        </div>
+        <div id="todayBtns" style="margin-bottom:8px;">
+            <label>오늘의추천 선택:</label>
+            <button class="btn today-btn" data-cat="정치">정치</button>
+            <button class="btn today-btn" data-cat="경제">경제</button>
+            <button class="btn today-btn" data-cat="사회">사회</button>
+            <button class="btn today-btn" data-cat="생활문화">생활문화</button>
+            <button class="btn today-btn" data-cat="연예">연예</button>
+            <button class="btn today-btn" data-cat="스포츠">스포츠</button>
+            <button class="btn today-btn" data-cat="건강">건강</button>
+        </div>
+    </div>
+    <div class="results">
+        <div id="status"></div>
+        <div id="newsContainer"></div>
+    </div>
+</div>
+
+<script>
+let currentData = null;
+let selectedTodayCategories = [];
+
+document.querySelectorAll('.today-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const cat = btn.dataset.cat;
+        if (selectedTodayCategories.includes(cat)) {
+            selectedTodayCategories = selectedTodayCategories.filter(c => c !== cat);
+            btn.style.background = '#007bff';
+        } else {
+            selectedTodayCategories.push(cat);
+            btn.style.background = '#2ecc71';
+        }
+    });
+});
+
+function setStatus(msg, type='') {
+    const s = document.getElementById('status');
+    s.innerText = msg;
+    s.style.color = type==='error' ? '#c0392b' : '#2ecc71';
+}
+
+async function fetchNews() {
+    // 요청 시작 시간 기록
+    const startTime = new Date();
+    
+    const cat = document.getElementById('category').value;
+    let endpoint = '/api/news';
+    if (cat) {
+        endpoint = '/api/news/' + encodeURIComponent(cat);
+        if (cat === '오늘의추천' && selectedTodayCategories.length) {
+            endpoint += '?categories=' + encodeURIComponent(selectedTodayCategories.join(','));
+        }
+    }
+    setStatus('뉴스를 가져오는 중...');
+    try {
+        const resp = await fetch(endpoint);
+        const data = await resp.json();
+        currentData = data;
+        renderNews(data);
+
+        // 요청 완료 시간 기록 및 경과 시간 계산
+        const endTime = new Date();
+        const elapsedTime = (endTime - startTime) / 1000; // 초 단위
+        const minutes = Math.floor(elapsedTime / 60);
+        const seconds = Math.floor(elapsedTime % 60);
+        const displayTime = minutes > 0 ? `${minutes}분 ${seconds}초` : `${seconds}초`;
+        
+        setStatus(`뉴스 로드 완료 (${displayTime} 걸림)`);
+    } catch (e) {
+        setStatus('요청 실패: ' + e.message, 'error');
+    }
+}
+
+function renderNews(data) {
+    const container = document.getElementById('newsContainer');
+    container.innerHTML = '';
+    if (!Array.isArray(data) || !data.length) {
+        container.innerText = '뉴스가 없습니다.';
+        return;
+    }
+    const grid = document.createElement('div');
+    grid.className = 'news-grid';
+    data.forEach(n => {
+        const card = document.createElement('div');
+        card.className = 'news-card';
+        const img = document.createElement('img');
+        img.src = n.image_url || 'https://via.placeholder.com/400x200?text=No+Image';
+        card.appendChild(img);
+        const content = document.createElement('div');
+        content.className = 'content';
+        content.innerHTML = `
+            <h3>${n.title}</h3>
+            <p>${n.preview_summary}</p>
+            <div class="meta">${n.pub_date || ''} | ${n.source} | views: ${n.view_count || 'None'}</div>
+            <a href="${n.link}" target="_blank">원문 보기</a>
+        `;
+        card.appendChild(content);
+        grid.appendChild(card);
+    });
+    container.appendChild(grid);
+}
+
+function showJson() {
+    if(!currentData) return alert('먼저 뉴스를 가져오세요');
+    const w = window.open('', '_blank');
+    w.document.write('<pre>' + JSON.stringify(currentData, null, 2) + '</pre>');
+}
+</script>
+</body>
+</html>
+"""
+
 @app.route('/test')
 def test_page():
-    return render_template_string(TEST_PAGE_HTML,
-                                current_url=request.host_url,
-                                categories=list(CATEGORIES.keys()))
+    return render_template_string(TEST_PAGE_HTML)
 
+# -----------------------------
+# 뉴스 API (카테고리별)
+# -----------------------------
+@app.route('/api/news', defaults={'category': None})
 @app.route('/api/news/<category>')
-def get_news_by_category(category):
-    """카테고리별 뉴스 조회"""
-    if category not in CATEGORIES:
-        return jsonify({"error": "지원하지 않는 카테고리입니다."}), 400
+def api_news(category):
+    selected_cats = request.args.get('categories')
+    selected_list = selected_cats.split(',') if selected_cats else []
+    result = []
+    categories_to_fetch = [category] if category and category != '오늘의추천' else (selected_list or list(CATEGORIES.keys()))
+    
+    # 5개의 뉴스를 가져오기 위해, 한 번에 요청하는 개수를 줄입니다.
+    # 각 소스(네이버, NewsAPI)에서 5개를 가져오므로, 총 10개까지 올 수 있습니다.
+    for cat in categories_to_fetch:
+        naver_items = news_service.get_naver_news(cat, count=5)
+        newsapi_items = news_service.get_newsapi_news(cat, count=5)
+        result.extend(normalize_and_enrich(naver_items, source='naver', category=cat))
+        result.extend(normalize_and_enrich(newsapi_items, source='newsapi', category=cat))
+    
+    # 최종적으로 5개만 반환하도록 리스트를 자릅니다.
+    result = result[:5]
 
-    news_data = news_service.get_naver_news(category)
-
-    if not news_data or 'items' not in news_data:
-        return jsonify({"error": "뉴스를 가져올 수 없습니다."}), 500
-
-    processed_news = []
-    for item in news_data['items'][:5]:
-        title = re.sub(r'<[^>]+>', '', item['title'])
-        description = re.sub(r'<[^>]+>', '', item['description'])
-
-        image_url = None
-        if len(processed_news) < 3:
-            image_url = news_service.extract_image_from_content(item['link'])
-
-        news_item = {
-            "title": title,
-            "description": description,
-            "link": item['link'],
-            "pub_date": item['pubDate'],
-            "image_url": image_url,
-            "preview_summary": news_service.summarize_news(title, description, "preview"),
-            "detailed_summary": news_service.summarize_news(title, description, "detailed"),
-            "category": category
-        }
-        processed_news.append(news_item)
-
-    return jsonify({
-        "category": category,
-        "news": processed_news,
-        "total": len(processed_news)
-    })
-
-@app.route('/api/news')
-def get_all_categories():
-    """모든 카테고리의 뉴스 조회"""
-    all_news = {}
-
-    for category in CATEGORIES.keys():
-        news_data = news_service.get_naver_news(category, 3)
-
-        if news_data and 'items' in news_data:
-            processed_news = []
-            for item in news_data['items'][:3]:
-                title = re.sub(r'<[^>]+>', '', item['title'])
-                description = re.sub(r'<[^>]+>', '', item['description'])
-
-                news_item = {
-                    "title": title,
-                    "description": description,
-                    "link": item['link'],
-                    "pub_date": item['pubDate'],
-                    "preview_summary": news_service.summarize_news(title, description, "preview"),
-                    "category": category
-                }
-                processed_news.append(news_item)
-
-            all_news[category] = processed_news
-
-    return jsonify(all_news)
+    result = sorted(result, key=lambda x: x.get('pub_date') or '', reverse=True)
+    return jsonify(result)
 
 @app.route('/api/categories')
-def get_categories():
-    """지원하는 카테고리 목록"""
+def api_categories():
     return jsonify(list(CATEGORIES.keys()))
 
-# OPTIONS 요청 처리 (CORS preflight)
-@app.route('/api/<path:path>', methods=['OPTIONS'])
-def options_handler(path):
-    return '', 200
+# -----------------------------
+# ngrok 시작
+# -----------------------------
+if NGROK_AUTHTOKEN:
+    os.system(f"ngrok config add-authtoken {NGROK_AUTHTOKEN}")
+    public_url = ngrok.connect(8000)
+    print(f"🔗 Public URL: {public_url}")
 
-# 🌐 서버 실행 및 ngrok 터널 설정
-try:
-    # 기존 터널 종료
-    ngrok.kill()
+# -----------------------------
+# 서버 실행
+# -----------------------------
+# -----------------------------
+# 서버 실행 (수정 버전)
+# -----------------------------
+def start_server():
+    # ngrok 연결
+    public_url = ngrok.connect(8000)
+    print(f"🌐 Ngrok URL: {public_url}")
 
-    # 새 터널 생성
-    port = 8000
-    public_url = ngrok.connect(port)
+    # Flask 앱 실행
+    app.run(host='0.0.0.0', port=8000, debug=False, use_reloader=False)
 
-    print(f"🚀 서버가 시작됩니다!")
-    print(f"📱 모바일 앱에서 사용할 URL: {public_url}")
-    print(f"🔗 웹 테스트 페이지: {public_url}/test")
-    print(f"📋 API 엔드포인트:")
-    print(f"   - 전체 뉴스: {public_url}/api/news")
-    print(f"   - 정치 뉴스: {public_url}/api/news/정치")
-    print(f"   - 카테고리 목록: {public_url}/api/categories")
-    print("\n" + "="*60)
-
-    # Flask 서버를 백그라운드에서 실행
-    def run_server():
-        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
-    # 서버를 별도 스레드에서 실행
-    server_thread = threading.Thread(target=run_server)
-    server_thread.daemon = True
-    server_thread.start()
-
-    print("✅ 서버가 백그라운드에서 실행중입니다!")
-    print(f"🌐 웹 테스트 페이지에서 바로 테스트하세요: {public_url}/test")
-
-    # 서버 시작 대기
-    time.sleep(3)
-
-    print("\n🎉 서버 준비 완료!")
-    print(f"📱 모바일 앱 연동 URL: {public_url}")
-    print(f"🔗 웹 테스트: {public_url}/test")
-
-except Exception as e:
-    print(f"❌ 서버 시작 오류: {e}")
-    print("💡 다시 실행해보세요.")
+# Colab에서 안전하게 스레드로 실행
+threading.Thread(target=start_server, daemon=True).start()
+print("✅ 서버 스레드 실행 완료! /test 또는 /api/news/<category> 확인 가능")
